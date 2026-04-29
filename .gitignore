@@ -7,7 +7,7 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-vue-template
+vue-project
 node_modules
 .DS_Store
 dist
