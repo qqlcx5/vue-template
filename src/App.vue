@@ -7,6 +7,7 @@
       <RouterLink to="/ErpProTable">ErpProTable</RouterLink>
       <RouterLink to="/ModernProTable">ModernProTable</RouterLink>
       <RouterLink to="/VxePage">VxePage</RouterLink>
+      <RouterLink to="/cx-showcase">CxShowcase</RouterLink>
     </div>
     <RouterView />
   </div>

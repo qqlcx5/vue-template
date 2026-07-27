@@ -1,3 +1,9 @@
+allowBuilds:
+  '@parcel/watcher': set this to true or false
+  es5-ext: true
+  typeit: true
+  vue-demi: true
+
 overrides:
   'vue': 'beta'
   '@vue/compiler-core': 'beta'

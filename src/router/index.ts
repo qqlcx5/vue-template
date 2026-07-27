@@ -35,6 +35,11 @@ const router = createRouter({
       // which is lazy-loaded when the route is visited.
       component: () => import('../views/VxePage.vue'),
     },
+    {
+      path: '/cx-showcase',
+      name: 'CxShowcase',
+      component: () => import('../views/cx-showcase/index.vue'),
+    },
   ],
 })
 
