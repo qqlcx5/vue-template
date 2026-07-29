@@ -99,7 +99,7 @@
       <h3>场景7：动态行数限制（radio 切换）</h3>
       <div class="demo-block">
         <el-radio-group v-model="lines" style="margin-bottom: 12px">
-          <el-radio-button :value="undefined">单行</el-radio-button>
+          <el-radio-button :value="0">单行</el-radio-button>
           <el-radio-button :value="2">两行</el-radio-button>
           <el-radio-button :value="4">四行</el-radio-button>
         </el-radio-group>
@@ -135,7 +135,7 @@ const tableData = [
 ]
 
 // 场景7：动态行数
-const lines = ref<number | undefined>(2)
+const lines = ref<number>(2)
 const longText = `这是一段用于测试动态行数限制的长文本。你可以通过上方的单选按钮切换不同的行数限制。
   当选择单行时，文本会在一行内省略；当选择两行或四行时，文本会在对应行数处截断并显示省略号。
   鼠标悬浮在截断的文本上时，会通过 Tooltip 展示完整内容。此功能适用于卡片描述、评论列表等场景。
