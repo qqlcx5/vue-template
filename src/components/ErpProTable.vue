@@ -26,7 +26,7 @@
         >
           <!-- 自定义外层表头内容 -->
           <template #header>
-            <div class="search-input-wrapper" v-if="col.search">
+            <div class="search-input-wrapper" v-if="col.search && col.prop">
               <!-- 文本搜索 -->
               <el-input
                 v-if="col.search.type === 'input'"
@@ -69,9 +69,9 @@
             <!-- 数据行渲染 -->
             <template #default="scope" v-if="!col.type">
               <!-- 如果外部传入了插槽，使用插槽 -->
-              <slot v-if="$slots[col.prop]" :name="col.prop" :row="scope.row" :index="scope.$index" />
+              <slot v-if="col.prop && $slots[col.prop]" :name="col.prop" :row="scope.row" :index="scope.$index" />
               <!-- 否则默认显示文本 -->
-              <span v-else>{{ scope.row[col.prop] ?? '' }}</span>
+              <span v-else>{{ (col.prop && scope.row[col.prop]) ?? '' }}</span>
             </template>
           </el-table-column>
 
@@ -102,16 +102,20 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue';
+import type { ProTableColumn, ProTableRequestApi } from './proTable';
 
-const props = defineProps({
-  requestApi: { type: Function, required: true },
-  columns: { type: Array, required: true },
-  pagination: { type: Boolean, default: true }
-});
+const props = withDefaults(
+  defineProps<{
+    requestApi: ProTableRequestApi;
+    columns: ProTableColumn[];
+    pagination?: boolean;
+  }>(),
+  { pagination: true },
+);
 
 const loading = ref(false);
-const tableData = ref([]);
-const searchParams = reactive({});
+const tableData = ref<Record<string, unknown>[]>([]);
+const searchParams = reactive<Record<string, unknown>>({});
 const pageable = reactive({ pageNum: 1, pageSize: 20, total: 0 });
 
 // 触发搜索
@@ -138,12 +142,12 @@ const fetchData = async () => {
   }
 };
 
-const handleSizeChange = (val) => {
+const handleSizeChange = (val: number) => {
   pageable.pageSize = val;
   triggerSearch();
 };
 
-const handleCurrentChange = (val) => {
+const handleCurrentChange = (val: number) => {
   pageable.pageNum = val;
   fetchData();
 };

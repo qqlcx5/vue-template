@@ -23,7 +23,7 @@
           class-name="filter-row-cell"
         >
           <template #header>
-            <div class="modern-input-wrapper" v-if="col.search">
+            <div class="modern-input-wrapper" v-if="col.search && col.prop">
               <!-- 文本输入 -->
               <div class="input-container" v-if="col.search.type === 'input'">
                 <i class="i-tabler-search input-prefix-icon"></i>
@@ -77,10 +77,10 @@
 
             <!-- 数据行渲染 -->
             <template #default="scope" v-if="!col.type">
-              <slot v-if="$slots[col.prop]" :name="col.prop" :row="scope.row" :index="scope.$index" />
+              <slot v-if="col.prop && $slots[col.prop]" :name="col.prop" :row="scope.row" :index="scope.$index" />
               <!-- 缺省态颜色变淡 -->
-              <span v-else :class="{'text-muted': !scope.row[col.prop]}">
-                {{ scope.row[col.prop] || '-' }}
+              <span v-else :class="{'text-muted': !(col.prop && scope.row[col.prop])}">
+                {{ (col.prop && scope.row[col.prop]) || '-' }}
               </span>
             </template>
           </el-table-column>
@@ -112,19 +112,22 @@
   </div>
 </template>
 
-<script setup>
-// Script 逻辑保持与之前一致，保持组件的纯粹性
+<script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue';
+import type { ProTableColumn, ProTableRequestApi } from './proTable';
 
-const props = defineProps({
-  requestApi: { type: Function, required: true },
-  columns: { type: Array, required: true },
-  pagination: { type: Boolean, default: true }
-});
+const props = withDefaults(
+  defineProps<{
+    requestApi: ProTableRequestApi;
+    columns: ProTableColumn[];
+    pagination?: boolean;
+  }>(),
+  { pagination: true },
+);
 
 const loading = ref(false);
-const tableData = ref([]);
-const searchParams = reactive({});
+const tableData = ref<Record<string, unknown>[]>([]);
+const searchParams = reactive<Record<string, unknown>>({});
 const pageable = reactive({ pageNum: 1, pageSize: 20, total: 0 });
 
 const triggerSearch = () => { pageable.pageNum = 1; fetchData(); };
