@@ -89,6 +89,23 @@ function replay(method, url, body) {
 const replayGet = url => replay('GET', url)
 const replayListPage = (page, rows) => replay('POST', LIST_URL, { page, rows, onlyShowSharingPosition: false })
 
+// 当前运行的任务空间（模块级，失败路径也能清理）
+let task = null
+
+/** 关闭抓取用的任务空间及其打开的页面；不影响浏览器里你自己的标签和登录态 */
+async function closeSpace() {
+  if (!task) return
+  try {
+    const done = await completeTaskSpace(task.id, { keep: false })
+    if (done && done.done) cliLog('  已关闭抓取任务空间及其打开的页面')
+    else cliLog('  任务空间未关闭（' + JSON.stringify(done) + '）：可能已被你手动接管，页面保留')
+  } catch (e) {
+    const msg = String(e)
+    if (msg.indexOf('not found') !== -1) cliLog('  任务空间已不存在，无需关闭')
+    else cliLog('  任务空间关闭失败（不影响抓取结果）: ' + msg.slice(0, 120))
+  }
+}
+
 /** 降级方案：打开大佬主页，搭车捕获应用自己发出的 profile / query-positions 响应 */
 async function scrapeTraderByNavigation(traderId) {
   await gotoAndWait('https://www.binance.com/zh-CN/smart-money/profile/' + traderId, { timeout: 30 })
@@ -274,18 +291,18 @@ function renderMarkdown(result) {
   return lines.join('\n')
 }
 
-async function main() {
-  cliLog('[1/5] 连接 ego 浏览器任务空间…')
-  const task = await useOrCreateTaskSpace('binance smart money scrape')
-
-  cliLog('[2/5] 打开我的订阅页并捕获应用请求…')
-  await cdp('Page.addScriptToEvaluateOnNewDocument', { source: PATCH_CODE })
-  const realTab = await ensureRealTab()
-  if (realTab) {
-    await gotoAndWait(PAGE_URL, { timeout: 30 })
-  } else {
+/**
+ * 建立捕获环境：确保标签页 → 注入补丁 → 加载订阅页 → 等待列表响应。
+ * 顺序很重要：新任务空间可能还没有任何标签页，必须先确保真实标签页存在，
+ * 再注入捕获补丁，最后重新加载页面；否则补丁注入到空目标上，捕获必然超时。
+ * 任务空间中途丢失（页面被关/浏览器重启）时可重复调用以恢复。
+ */
+async function setupCapture() {
+  if (!(await ensureRealTab())) {
     await openOrReuseTab(PAGE_URL, { wait: true, timeout: 30 })
   }
+  await cdp('Page.addScriptToEvaluateOnNewDocument', { source: PATCH_CODE })
+  await gotoAndWait(PAGE_URL, { timeout: 30 })
 
   // 等待捕获到订阅列表响应（同时拿到请求头模板）
   const listCap = await waitFor(() => js(String.raw`(() => {
@@ -293,18 +310,44 @@ async function main() {
     return c.length ? c[c.length - 1] : null
   })()`), { timeoutSec: 30 })
   if (!listCap) {
-    throw new Error('未捕获到订阅列表请求。请先在 ego 浏览器里登录 binance.com，再重新运行本脚本。')
+    const diag = await js(String.raw`(() => {
+      const text = document.body ? document.body.innerText : ''
+      return {
+        patched: Array.isArray(window.__smCap),
+        needLogin: text.indexOf('登录') !== -1 || text.indexOf('Log In') !== -1,
+      }
+    })()`).catch(() => null)
+    if (diag && !diag.patched) {
+      throw new Error('捕获补丁未生效（多为浏览器冷启动竞态）。请直接再运行一次；若反复出现请反馈。')
+    }
+    if (diag && diag.needLogin) {
+      throw new Error('页面要求登录。请先在 ego 浏览器里登录 binance.com，再重新运行本脚本。')
+    }
+    throw new Error('页面已打开但未捕获到订阅列表请求（加载超时或接口变更）。请重跑一次；若反复出现请检查网络。')
   }
 
   let firstList
   try { firstList = JSON.parse(listCap.body) } catch (e) { throw new Error('订阅列表响应解析失败: ' + String(e).slice(0, 120)) }
   if (firstList.code !== '000000' || !Array.isArray(firstList.data)) {
     const msg = firstList.message || ''
-    if (/log in/i.test(msg) || firstList.code === '100001005') {
+    if (msg.indexOf('log in') !== -1 || firstList.code === '100001005') {
       throw new Error('币安提示未登录（code ' + firstList.code + '）。请在 ego 浏览器登录 binance.com 后重试。')
     }
     throw new Error('订阅列表接口异常 code=' + firstList.code + ' ' + msg)
   }
+  return firstList
+}
+
+function spaceAlive() {
+  return js('1').then(() => true).catch(() => false)
+}
+
+async function main() {
+  cliLog('[1/5] 连接 ego 浏览器任务空间…')
+  task = await useOrCreateTaskSpace('binance smart money scrape')
+
+  cliLog('[2/5] 打开我的订阅页并捕获应用请求…')
+  const firstList = await setupCapture()
 
   const traders = new Map()
   for (const t of firstList.data) traders.set(t.topTraderId, t)
@@ -334,6 +377,10 @@ async function main() {
   for (const t of traders.values()) {
     idx++
     cliLog('  (' + idx + '/' + traders.size + ') ' + t.traderName + ' …')
+    if (!(await spaceAlive())) {
+      cliLog('  ⚠ 任务空间丢失（页面被关闭或浏览器重启），重新建立后继续…')
+      await setupCapture()
+    }
     const detail = await scrapeTrader(t.topTraderId)
     const profileError = detail.profile && !detail.profile.ok ? (detail.profile.error || detail.profile.code || 'unknown') : null
     const posErr = {}
@@ -396,13 +443,14 @@ async function main() {
   cliLog('  大佬数量: ' + enriched.length + '（接口 total=' + total + '）')
   cliLog('  JSON: ' + jsonPath)
   cliLog('  MD:   ' + mdPath)
-  cliLog('  任务空间已保留（' + task.id + '），可重复运行脚本复用登录态。')
+  await closeSpace()
 }
 
 try {
   await main()
 } catch (e) {
   cliLog('[错误] ' + String(e && e.message ? e.message : e))
+  await closeSpace()
   if (typeof process !== 'undefined') process.exitCode = 1
   else throw e
 }
