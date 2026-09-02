@@ -13,9 +13,6 @@
     "lint:oxlint": "oxlint . --fix",
     "lint:eslint": "eslint . --fix --cache",
     "format": "oxfmt src/",
-    "sm:login": "node scripts/smart-money/login.mjs",
-    "sm:discover": "node scripts/smart-money/discover.mjs",
-    "sm:scrape": "node scripts/smart-money/scrape.mjs",
     "scrape:smart-money": "sh scripts/run-fetch-smart-money.sh"
   },
   "dependencies": {
@@ -42,7 +39,6 @@
     "npm-run-all2": "^9.0.2",
     "oxfmt": "^0.59.0",
     "oxlint": "~1.74.0",
-    "playwright": "^1.62.1",
     "sass-embedded": "^1.100.0",
     "typescript": "~6.0.0",
     "unocss": "^66.7.5",

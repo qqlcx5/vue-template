@@ -69,35 +69,44 @@ async function waitFor(fn, { timeoutSec = 25, intervalSec = 0.5 } = {}) {
   return null
 }
 
-/** 在页面上下文里用捕获到的请求头重放 GET 接口 */
-function replayGet(url) {
+/** 在页面上下文里用捕获到的请求头重放接口（body 为对象时按 JSON POST） */
+function replay(method, url, body) {
   return js(String.raw`(async () => {
     const H = window.__smHdrs
     if (!H) return { ok: false, error: 'no-captured-headers' }
     try {
-      const r = await fetch(${JSON.stringify(url)}, { method: 'GET', headers: H, credentials: 'include' })
+      const r = await fetch(${JSON.stringify(url)}, {
+        method: ${JSON.stringify(method)},
+        headers: H,
+        credentials: 'include',
+        ${body ? 'body: ' + JSON.stringify(JSON.stringify(body)) + ',' : ''}
+      })
       const j = await r.json()
       return { ok: j.code === '000000', code: j.code, message: j.message, data: j.data, total: j.total }
     } catch (e) { return { ok: false, error: String(e).slice(0, 200) } }
   })()`)
 }
+const replayGet = url => replay('GET', url)
+const replayListPage = (page, rows) => replay('POST', LIST_URL, { page, rows, onlyShowSharingPosition: false })
 
 /** 降级方案：打开大佬主页，搭车捕获应用自己发出的 profile / query-positions 响应 */
 async function scrapeTraderByNavigation(traderId) {
   await gotoAndWait('https://www.binance.com/zh-CN/smart-money/profile/' + traderId, { timeout: 30 })
   const found = await waitFor(() => js(String.raw`(() => {
     const cap = window.__smCap || []
-    const pos = cap.filter(c => c.url.indexOf('query-positions') !== -1)
-    const prof = cap.filter(c => c.url.indexOf('smart-money/profile?') !== -1)
-    return (pos.length >= 2 || pos.length > 0) && prof.length > 0
-      ? { posCount: pos.length, profCount: prof.length } : null
+    const tid = ${JSON.stringify(traderId)}
+    const prof = cap.filter(c => c.url.indexOf('smart-money/profile?') !== -1 && c.url.indexOf(tid) !== -1)
+    const pos = cap.filter(c => c.url.indexOf('query-positions') !== -1 && c.url.indexOf(tid) !== -1)
+    return prof.length > 0 && pos.length > 0 ? { prof: prof.length, pos: pos.length } : null
   })()`), { timeoutSec: 20 })
   if (!found) return { ok: false, error: 'navigation-timeout' }
+  await wait(1.2) // 再等一路 UM/CM 请求落地，避免漏掉另一个市场
   return js(String.raw`(() => {
+    const tid = ${JSON.stringify(traderId)}
     const parse = c => { try { const j = JSON.parse(c.body); return { ok: j.code === '000000', code: j.code, message: j.message, data: j.data, total: j.total } } catch (e) { return { ok: false, error: 'bad-json' } } }
     const cap = window.__smCap || []
-    const prof = [...cap].reverse().find(c => c.url.indexOf('smart-money/profile?') !== -1)
-    const pick = mt => [...cap].reverse().find(c => c.url.indexOf('query-positions') !== -1 && c.url.indexOf('marketType=' + mt) !== -1)
+    const prof = [...cap].reverse().find(c => c.url.indexOf('smart-money/profile?') !== -1 && c.url.indexOf(tid) !== -1)
+    const pick = mt => [...cap].reverse().find(c => c.url.indexOf('query-positions') !== -1 && c.url.indexOf('marketType=' + mt) !== -1 && c.url.indexOf(tid) !== -1)
     const pUM = pick('UM'); const pCM = pick('CM')
     return { ok: true, via: 'navigation', profile: prof ? parse(prof) : null, UM: pUM ? parse(pUM) : null, CM: pCM ? parse(pCM) : null }
   })()`)
@@ -117,16 +126,23 @@ async function scrapeTrader(traderId) {
         const r = await replayGet(POSITIONS_URL + '?topTraderId=' + traderId
           + '&marketType=' + marketType + '&page=' + page + '&rows=' + ROWS)
         if (!r.ok) return { ok: false, data: out, total, error: r.error || (r.code + ' ' + (r.message || '')) }
-        if (Array.isArray(r.data)) out.push(...r.data)
-        total = typeof r.total === 'number' ? r.total : total
-        if (typeof total !== 'number' || out.length >= total || r.data.length === 0) break
+        if (!Array.isArray(r.data)) return { ok: false, data: out, total, error: '接口返回异常数据: ' + JSON.stringify(r.data).slice(0, 80) }
+        out.push(...r.data)
+        total = typeof r.total === 'number' ? r.total : (Number.isFinite(Number(r.total)) ? Number(r.total) : null)
+        if (r.data.length === 0) break
+        if (typeof total === 'number' && out.length >= total) break
+        if (r.data.length < ROWS) break // total 未知时，非整页即末页
       }
-      return { ok: true, data: out, total }
+      return { ok: true, data: out, total, partial: typeof total === 'number' && out.length < total }
     }
 
     const um = await fetchAllPositions('UM')
     const cm = await fetchAllPositions('CM')
-    result = { ok: true, via: 'replay', profile, UM: um, CM: cm }
+    // 「用户已隐藏当前仓位」是正常无数据，不算失败、不触发降级
+    const hidden = r => !r.ok && String(r.code) === '1899116'
+    const acceptable = r => r.ok || hidden(r)
+    // 只有 profile/UM/CM 全部失败（如登录过期、请求头失效）才降级为逐个打开主页
+    result = { ok: acceptable(profile) || acceptable(um) || acceptable(cm), via: 'replay', profile, UM: um, CM: cm }
   } catch (e) {
     result = { ok: false, error: String(e).slice(0, 200) }
   }
@@ -155,11 +171,17 @@ function fmtNum(x) {
 }
 const esc = s => String(s == null ? '' : s).replace(/\|/g, '\\|')
 
+function fmtDateLocal(ts) {
+  const d = new Date(ts)
+  if (Number.isNaN(d.getTime())) return ''
+  const p = n => String(n).padStart(2, '0')
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+}
 function positionStatusText(t) {
   if (t.positionStatus === 'IN_POSITION') return '持仓中'
   if (t.positionStatus === 'PRIVATE_POSITION' || t.positionShared === false) return '私密仓位'
-  if (t.lastTrade) return '最近交易 ' + new Date(t.lastTrade).toISOString().slice(0, 10)
-  return '暂无仓位'
+  const d = t.lastTrade ? fmtDateLocal(t.lastTrade) : ''
+  return d ? '最近交易 ' + d : '暂无仓位'
 }
 
 function renderMarkdown(result) {
@@ -169,6 +191,9 @@ function renderMarkdown(result) {
   lines.push('- 抓取时间：' + result.scrapedAt)
   lines.push('- 来源：' + result.source)
   lines.push('- 订阅大佬：' + result.traderCount + ' 位')
+  if (Number.isFinite(result.total) && result.total !== result.traderCount) {
+    lines.push('- 接口报告总数：' + result.total + '（实际抓到 ' + result.traderCount + '，分页期间订阅列表有变动）')
+  }
   let umCount = 0; let cmCount = 0
   for (const t of result.traders) {
     umCount += (t.positions && t.positions.UM ? t.positions.UM.length : 0)
@@ -213,15 +238,17 @@ function renderMarkdown(result) {
     const pos = t.positions || {}
     const hasUM = pos.UM && pos.UM.length > 0
     const hasCM = pos.CM && pos.CM.length > 0
-    if (!hasUM && !hasCM) {
-      const note = (t.positionsErrors && Object.values(t.positionsErrors).filter(Boolean).join('; ')) || ''
-      lines.push('- 当前持仓：无可见持仓' + (t.positionShared === false ? '（私密仓位）' : '') + (note ? '（' + esc(note) + '）' : ''))
+    const anyErr = t.positionsErrors && Object.values(t.positionsErrors).some(Boolean)
+    if (!hasUM && !hasCM && !anyErr) {
+      lines.push('- 当前持仓：无可见持仓' + (t.positionShared === false ? '（私密仓位）' : ''))
     }
     for (const mt of ['UM', 'CM']) {
       const list = pos[mt]
+      const err = t.positionsErrors && t.positionsErrors[mt]
+      if (err) lines.push('- ⚠ ' + (mt === 'UM' ? 'U 本位' : '币本位') + '持仓获取失败：' + esc(err))
       if (!list || list.length === 0) continue
       lines.push('')
-      lines.push('### 当前持仓（' + (mt === 'UM' ? 'U 本位合约' : '币本位合约') + '，' + list.length + ' 笔）')
+      lines.push('### 当前持仓（' + (mt === 'UM' ? 'U 本位合约' : '币本位合约（保证金/盈亏为币种计价）') + '，' + list.length + ' 笔）')
       lines.push('')
       lines.push('| 交易对 | 杠杆 | 数量 | 开仓价 | 标记价 | 强平价 | 保证金 | 未实现盈亏 | ROI | 逐仓 |')
       lines.push('|--------|------|------|--------|--------|--------|--------|------------|-----|------|')
@@ -281,25 +308,15 @@ async function main() {
 
   const traders = new Map()
   for (const t of firstList.data) traders.set(t.topTraderId, t)
-  const total = typeof firstList.total === 'number' ? firstList.total : traders.size
+  const totalNum0 = Number(firstList.total)
+  const total = Number.isFinite(totalNum0) && totalNum0 > 0 ? totalNum0 : traders.size
   cliLog('  第 1 页拿到 ' + firstList.data.length + ' 位，共 ' + total + ' 位')
 
   // 翻页（重放，带应用自己的请求头；按首页实际 rows 计算页数）
   const page1Rows = firstList.data.length || ROWS
   const maxPage = Math.min(Math.ceil(total / page1Rows) || 1, 10)
   for (let page = 2; page <= maxPage && traders.size < total; page++) {
-    const r = await js(String.raw`(async () => {
-      const H = window.__smHdrs
-      if (!H) return { ok: false, error: 'no-captured-headers' }
-      try {
-        const resp = await fetch(${JSON.stringify(LIST_URL)}, {
-          method: 'POST', headers: H, credentials: 'include',
-          body: JSON.stringify({ page: ${page}, rows: ${page1Rows}, onlyShowSharingPosition: false }),
-        })
-        const j = await resp.json()
-        return { ok: j.code === '000000', code: j.code, message: j.message, data: j.data, total: j.total }
-      } catch (e) { return { ok: false, error: String(e).slice(0, 200) } }
-    })()`)
+    const r = await replayListPage(page, page1Rows)
     if (!r.ok || !Array.isArray(r.data)) {
       cliLog('  第 ' + page + ' 页获取失败（' + (r.error || r.code || '') + '），跳过')
       break
@@ -323,9 +340,14 @@ async function main() {
     const positions = { UM: [], CM: [] }
     for (const mt of ['UM', 'CM']) {
       const r = detail[mt]
-      if (r && r.ok && Array.isArray(r.data)) positions[mt] = r.data
-      else if (!r) posErr[mt] = 'no-data-returned'
-      else posErr[mt] = r.error || (r.ok ? '' : ((r.code || '') + ' ' + (r.message || '')).trim())
+      if (r && r.ok && Array.isArray(r.data)) {
+        positions[mt] = r.data
+        if (r.partial) posErr[mt] = '数据不完整: ' + r.data.length + '/' + r.total + '（超出翻页上限）'
+      } else if (!r) {
+        posErr[mt] = 'no-data-returned'
+      } else {
+        posErr[mt] = r.error || (r.ok ? '接口返回异常数据' : ((r.code || '') + ' ' + (r.message || '')).trim())
+      }
     }
     enriched.push({
       ...t,
@@ -343,19 +365,17 @@ async function main() {
   const fs = await import('node:fs')
   const path = await import('node:path')
 
-  // ego 运行时里 process.cwd() 可能是 /，从环境变量解析项目根目录并校验
+  // ego 运行时里 process.cwd() 是 / 且环境变量被清空，由包装器注入 __PROJECT_ROOT__
   const candidates = [
     typeof globalThis.__PROJECT_ROOT__ === 'string' ? globalThis.__PROJECT_ROOT__ : null,
     process.env.SMART_MONEY_PROJECT_ROOT,
-    process.env.INIT_CWD,
-    process.env.PWD,
     process.cwd(),
   ].filter(Boolean)
   const root = candidates.find(p => {
     try { return fs.existsSync(path.join(p, 'package.json')) } catch (e) { return false }
   })
   if (!root) {
-    throw new Error('无法定位项目根目录（尝试过: ' + candidates.join(', ') + '）。请在项目根目录运行，或设置 SMART_MONEY_PROJECT_ROOT 环境变量。')
+    throw new Error('无法定位项目根目录（cwd: ' + process.cwd() + '）。请用 sh scripts/run-fetch-smart-money.sh 或 pnpm scrape:smart-money 运行，或设置 SMART_MONEY_PROJECT_ROOT。')
   }
   const outDir = path.join(root, 'data', 'smart-money')
   fs.mkdirSync(outDir, { recursive: true })
@@ -383,6 +403,6 @@ try {
   await main()
 } catch (e) {
   cliLog('[错误] ' + String(e && e.message ? e.message : e))
-  if (typeof process !== 'undefined' && process.exitCode !== undefined) process.exitCode = 1
+  if (typeof process !== 'undefined') process.exitCode = 1
   else throw e
 }
