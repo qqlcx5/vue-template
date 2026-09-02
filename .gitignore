@@ -29,6 +29,9 @@ coverage
 
 .eslintcache
 
+# 抓取脚本的浏览器缓存 / 登录态 / 原始响应
+.cache/smart-money/
+
 # Cypress
 /cypress/videos/
 /cypress/screenshots/
